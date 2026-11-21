@@ -1,5 +1,5 @@
 /*
- * Auto Expand for X
+ * h19e8p Patches
  * Copyright (C) 2026 h19e8p
  *
  * This program is free software: you can redistribute it and/or modify it under
@@ -83,6 +83,18 @@ public final class GapFill {
      */
     private static final int MAX_FETCHES_PER_LIST = 30;
 
+    /**
+     * 上限で止めた一覧も、最後に裏で読み込んでからこの時間がたてば数え直す。ホームの一覧は
+     * X が動いている間ずっと同じなので、数え直さないと、何日も裏の読み込みが止まったままになる。
+     */
+    private static final long LIMIT_RESET_MS = 10 * 60_000L;
+
+    /** 自動タップで読み込んだ返信の続きのボタンを、裏の読み込みが二重に要求しないための時間。 */
+    private static final long TAPPED_RECENTLY_MS = 2 * 60_000L;
+
+    /** メモリの上の記録 (要求した・何も入らなかった・画面の名前) がこの件数を超えたら空にする。 */
+    private static final int MAX_MEMORY_KEYS = 3000;
+
     /** 結果が届かない取得は、この時間がたてば、何も入らなかったものとして自動タップに回す。 */
     private static final long PENDING_TIMEOUT_MS = 20_000L;
 
@@ -148,6 +160,10 @@ public final class GapFill {
             this.at = at;
         }
     }
+    /** 自動タップで読み込んだカーソルと、その時刻。 */
+    private static final Map<String, Long> tappedAt = new HashMap<>();
+    /** 使い終わりの記録の保存を予約している。 */
+    private static boolean saveUsedPending;
     /** この取得が要求したが、何も入らなかったカーソル。 */
     private static final Set<String> empty = new HashSet<>();
     /**
@@ -305,30 +321,40 @@ public final class GapFill {
      * すべてのタイムラインの読み込みの、すべての項目で動くので、できるだけ何もしない。
      */
     public static void onRowType(int type) {
-        RowScan scan = scans.get();
-        if (scan == null) return;
-        // 位置は読み返さずに数えているので、すべての項目がここを通る必要がある。
-        int position = scan.position++;
-        if (type != GAP_ROW_TYPE) return;
-        Object cursor = scan.cursor.get();
-        if (cursor == null) return;
-        int[] gaps = Arrays.copyOf(scan.gaps, scan.gaps.length + 1);
-        gaps[gaps.length - 1] = position;
-        scan.gaps = gaps;
-        gapRows.put(cursor, gaps);
+        // X の読み込みの途中で呼ばれるので、ここで例外を出すと X ごと落ちる。必ず受け止める。
+        try {
+            RowScan scan = scans.get();
+            if (scan == null) return;
+            // 位置は読み返さずに数えているので、すべての項目がここを通る必要がある。
+            int position = scan.position++;
+            if (type != GAP_ROW_TYPE) return;
+            Object cursor = scan.cursor.get();
+            if (cursor == null) return;
+            int[] gaps = Arrays.copyOf(scan.gaps, scan.gaps.length + 1);
+            gaps[gaps.length - 1] = position;
+            scan.gaps = gaps;
+            gapRows.put(cursor, gaps);
+        } catch (Throwable ex) {
+            scans.remove();
+        }
     }
 
     /**
      * ギャップのバインダーが作られた時に呼ばれる。
      */
     public static void onBinderCreated(Object binder) {
-        if (binder == null) return;
-        binders.add(binder);
-        // 取得中のカーソルの経路は、メインスレッドでしか触らない。
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            markLate(binder);
-        } else {
-            main.post(() -> markLate(binder));
+        // X の部品を組み立てる途中で呼ばれるので、ここで例外を出すと X ごと落ちる。必ず受け止める。
+        try {
+            if (binder == null) return;
+            binders.add(binder);
+            // 取得中のカーソルの経路は、メインスレッドでしか触らない。
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                markLate(binder);
+            } else {
+                main.post(() -> markLate(binder));
+            }
+        } catch (Throwable ex) {
+            Log.e(TAG, "GapFill: binder hook failed", ex);
         }
     }
 
@@ -342,10 +368,13 @@ public final class GapFill {
             // フックした読み込み処理が読んだタイムラインではない。
             if (gaps == null) return;
             String type = list.getClass().getName();
-            String[] screen = screenOf(type);
-            recordOnce("watching:" + type, screen == null
-                    ? "[Screen] Watching " + type + " (" + hostOf(list) + ")"
-                    : "[Screen] Watching " + screen[2] + " (" + type + ", " + hostOf(list) + ")");
+            // hostOf() はクラスのフィールドをたどる重い処理なので、まだ記録していない時だけ動かす。
+            if (!recordedOnce.contains("watching:" + type)) {
+                String[] screen = screenOf(type);
+                recordOnce("watching:" + type, screen == null
+                        ? "[Screen] Watching " + type + " (" + hostOf(list) + ")"
+                        : "[Screen] Watching " + screen[2] + " (" + type + ", " + hostOf(list) + ")");
+            }
             // ギャップが無くなった一覧でも、結果を待っている取得があれば、その判断を付ける。
             Run run = runs.get(list);
             if (gaps.length == 0 && (run == null || run.pendingKey == null)) return;
@@ -444,7 +473,25 @@ public final class GapFill {
 
     /** 自動タップがこのカーソルを読み込む。この取得からは要求しない。 */
     static void onTapped(String key) {
-        if (key != null) requested.add(key);
+        if (key == null) return;
+        requested.add(key);
+        tappedAt.put(key, SystemClock.uptimeMillis());
+    }
+
+    /** 少し前に自動タップで読み込んだカーソルか。 */
+    private static boolean tappedRecently(String key, long now) {
+        Long at = tappedAt.get(key);
+        return at != null && now - at < TAPPED_RECENTLY_MS;
+    }
+
+    /** X が動いている間に増え続けないよう、メモリの上の記録が大きくなったら空にする。 */
+    private static void trimMemory() {
+        if (requested.size() > MAX_MEMORY_KEYS) requested.clear();
+        // 空にすると、何も入らなかったカーソルを、もう一度だけ裏で試すことになる。
+        if (empty.size() > MAX_MEMORY_KEYS) empty.clear();
+        if (keyScreens.size() > MAX_MEMORY_KEYS) keyScreens.clear();
+        if (tappedAt.size() > MAX_MEMORY_KEYS) tappedAt.clear();
+        if (recordedOnce.size() > MAX_MEMORY_KEYS) recordedOnce.clear();
     }
 
     private static void fill(Names n, Object list, Object items, int[] gaps) throws ReflectiveOperationException {
@@ -474,6 +521,7 @@ public final class GapFill {
         if (keys.isEmpty() && (run == null || run.pendingKey == null)) return;
 
         long now = SystemClock.uptimeMillis();
+        trimMemory();
         if (run == null) {
             run = new Run();
             runs.put(list, run);
@@ -512,7 +560,9 @@ public final class GapFill {
             // 一覧の最後の行のカーソルは、ギャップではなく続きを読み込むためのものと見て、
             // 裏では取らない。本物のギャップなら、画面に来た時に自動タップが拾う。
             if (positions.get(i) == size - 1) continue;
-            boolean done = replies ? run.requestedHere.contains(key) : requested.contains(key) || isUsed(key);
+            boolean done = replies
+                    ? run.requestedHere.contains(key) || tappedRecently(key, now)
+                    : requested.contains(key) || isUsed(key);
             if (!done) {
                 next = i;
                 break;
@@ -520,6 +570,12 @@ public final class GapFill {
         }
         if (next < 0) return;
 
+        if (run.total >= MAX_FETCHES_PER_LIST && now - run.lastFetchAt >= LIMIT_RESET_MS) {
+            AutoExpandCursor.record("[Limit] Counting again on " + screenName + " after "
+                    + LIMIT_RESET_MS / 60_000 + " minutes without loading in the background");
+            run.total = 0;
+            run.stopped = false;
+        }
         if (run.total >= MAX_FETCHES_PER_LIST) {
             if (!run.stopped) {
                 AutoExpandCursor.record("[Limit] Stopped loading in the background on " + screenName + " after "
@@ -547,7 +603,19 @@ public final class GapFill {
         }
 
         String key = keys.get(next);
-        n.emit.invoke(channel, n.fetch.newInstance(cursors.get(next)));
+        try {
+            n.emit.invoke(channel, n.fetch.newInstance(cursors.get(next)));
+        } catch (Throwable ex) {
+            // 送れなかったボタンは二度と裏で要求せず、画面に来た時の自動タップに任せる。印を
+            // 付けないと、一覧が届くたびに同じボタンを要求し直し、そのたびにエラーを書くことになる。
+            requested.add(key);
+            empty.add(key);
+            AutoExpandCursor.record("[Error] Could not request button " + tag(key) + " in the background ("
+                    + ex + ") -> it will be tapped when it comes on screen");
+            Log.e(TAG, "GapFill: request failed", ex);
+            AutoExpandCursor.onGapKeyChanged(key);
+            return;
+        }
         AutoExpandCursor.recordRequest(now);
         boolean spinner = markInFlight(n, channel, key);
 
@@ -612,6 +680,13 @@ public final class GapFill {
         // 間を次のボタンまでで測ったか (でなければ一覧の最後まで)。記録の文言に使う。
         boolean until = run.nextKeyAtFetch != null && keys.indexOf(run.nextKeyAtFetch) > index;
         String where = until ? "to the next button" : "to the end of the list";
+        if (run.nextKeyAtFetch != null && !until) {
+            // 比べる相手の次のボタンが一覧から消えた。一覧の最後までの数で比べると、X が一覧の下に
+            // 続きを読み込んだだけでも増えて見え、「入った」と誤って判断しかねない。何も入らなかった
+            // 側に倒し、画面に来た時の自動タップに確かめさせる。
+            settleEmpty(run, key, "the next button left the list, so it cannot be compared");
+            return true;
+        }
         if (spanNow > run.spanAtFetch) {
             settleAdded(run, key, run.spanAtFetch + " -> " + spanNow + " items " + where, !replies);
             return true;
@@ -823,7 +898,22 @@ public final class GapFill {
 
     private static boolean isUsed(String key) {
         loadUsedKeys();
-        return usedKeys.contains(hash(key));
+        String hash = hash(key);
+        if (!usedKeys.contains(hash)) return false;
+        // 今も出てくるボタンは、古い順に消す時に後回しにする。並びの最後へ移し、少し後で保存する。
+        usedKeys.remove(hash);
+        usedKeys.add(hash);
+        if (!saveUsedPending) {
+            saveUsedPending = true;
+            main.postDelayed(GapFill::saveUsedKeys, 30_000L);
+        }
+        return true;
+    }
+
+    private static void saveUsedKeys() {
+        saveUsedPending = false;
+        SharedPreferences prefs = prefs();
+        if (prefs != null) prefs.edit().putString(PREF_USED_KEYS, String.join(",", usedKeys)).apply();
     }
 
     /** 保存してある記録を、最初に要る時に一度だけ読む。 */

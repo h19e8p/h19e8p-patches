@@ -1,5 +1,5 @@
 /*
- * Auto Expand for X
+ * h19e8p Patches
  * Copyright (C) 2026 h19e8p
  *
  * This program is free software: you can redistribute it and/or modify it under
@@ -45,6 +45,8 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import app.morphe.extension.h19e8p.Prefs;
+
 /**
  * タイムラインのギャップ (「ポストをさらに表示」) を扱う。
  *
@@ -52,7 +54,7 @@ import java.util.concurrent.Executors;
  * <ol>
  * <li>ギャップの中身は、タイムラインを読み込んだ時点で {@link GapFill} が裏で取得する。
  * <li>裏で取得しなかった・取得しても何も入らなかったギャップ (上限に達した後や、裏の取得が
- * 働かない画面のもの、名前を解決できない版や、裏で読み込まないオプションの時を含む) は、
+ * 働かない画面のもの、名前を解決できない版や、裏で読み込まない設定の時を含む) は、
  * 画面に来た時に自動でタップする。
  * <li>行を畳むのは、読み込みが始まったギャップ (裏で取得中・取得済み、タップで読み込みが
  * 始まったもの) と、前に使い終わったギャップだけである。見えているボタンは、まだ読めていない。
@@ -79,7 +81,7 @@ import java.util.concurrent.Executors;
  * メソッドはサーバーから送られたラベルの時しか呼ばれない。そのため、ギャップが現れた時を
  * それでは知ることができない。ギャップを調べるのは、画面に付いた時と、バインドのたびである。
  *
- * <p>設定画面は無い。動作は、パッチを当てる時のオプションで決める。
+ * <p>動作は、X の「設定とプライバシー」→「h19e8p Patches」の設定 ({@link Prefs}) で決める。変えていない項目は DEFAULT_* の値を使う。
  */
 public final class AutoExpandCursor {
     private static final String TAG = "AutoExpand";
@@ -193,45 +195,46 @@ public final class AutoExpandCursor {
     private AutoExpandCursor() {
     }
 
-    // パッチのオプション。パッチを当てる時に埋め込まれる。R8 は定数どうしの比較を畳み込んで
-    // しまうので、値として使うだけで、定数として比較はしない。
-
-    private static String hideGapsOption() {
-        return "autoexpand:opt:hideGaps";
-    }
-
-    private static String logToFileOption() {
-        return "autoexpand:opt:logToFile";
-    }
-
-    private static String showToastsOption() {
-        return "autoexpand:opt:showToasts";
-    }
-
-    private static String backgroundFetchOption() {
-        return "autoexpand:opt:backgroundFetch";
-    }
-
     /** パッチの版。診断ログに書くため、パッチを当てる時に埋め込まれる。 */
     private static String patchVersion() {
         return "autoexpand:info:patchVersion";
     }
 
+    /** このパッチが当たっているか。設定画面が項目を出すかどうかに使う。パッチが "true" に置き換える。 */
+    private static String appliedMark() {
+        return "autoexpand:info:applied";
+    }
+
+    public static boolean isApplied() {
+        return Boolean.parseBoolean(appliedMark());
+    }
+
+    // 設定画面 (h19e8p Patches) に保存する名前と、変えていない時の値 (初期値)。
+    public static final String PREF_BACKGROUND_FETCH = "autoexpand.backgroundFetch";
+    public static final String PREF_HIDE_GAPS = "autoexpand.hideGaps";
+    public static final String PREF_SHOW_TOASTS = "autoexpand.showToasts";
+    public static final String PREF_LOG_TO_FILE = "autoexpand.logToFile";
+
+    public static final boolean DEFAULT_BACKGROUND_FETCH = true;
+    public static final boolean DEFAULT_HIDE_GAPS = true;
+    public static final boolean DEFAULT_SHOW_TOASTS = false;
+    public static final boolean DEFAULT_LOG_TO_FILE = false;
+
     private static boolean hideGaps() {
-        return Boolean.parseBoolean(hideGapsOption());
+        return Prefs.bool(PREF_HIDE_GAPS, DEFAULT_HIDE_GAPS);
     }
 
     private static boolean logToFile() {
-        return Boolean.parseBoolean(logToFileOption());
+        return Prefs.bool(PREF_LOG_TO_FILE, DEFAULT_LOG_TO_FILE);
     }
 
     private static boolean showToasts() {
-        return Boolean.parseBoolean(showToastsOption());
+        return Prefs.bool(PREF_SHOW_TOASTS, DEFAULT_SHOW_TOASTS);
     }
 
     /** 画面に出る前に裏で読み込む。オフなら、ギャップは常にタップで開く。 */
     static boolean backgroundFetch() {
-        return Boolean.parseBoolean(backgroundFetchOption());
+        return Prefs.bool(PREF_BACKGROUND_FETCH, DEFAULT_BACKGROUND_FETCH);
     }
 
     /** アプリ本体の Context。まだ分からなければ null。 */
@@ -271,9 +274,14 @@ public final class AutoExpandCursor {
      */
     public static void onAppStart(Object application) {
         try {
-            if (application instanceof Context) appContext = (Context) application;
-            if (!logToFile()) return;
+            if (application instanceof Context) {
+                appContext = (Context) application;
+                Prefs.init(appContext);
+            }
+            // 画面の名前はログに書くためだけに使う。起動した後にログをオンにしても名前が分かるよう、
+            // ログの設定に関係なく見張る (軽い処理)。
             if (application instanceof Application) watchActivities((Application) application);
+            if (!logToFile()) return;
             // onCreate の最初に動くので、アプリの起動が終わるのを待つ。
             main.post(() -> {
                 try {
@@ -562,7 +570,11 @@ public final class AutoExpandCursor {
             String tag = GapFill.tag(state.key);
             if (state.taps >= MAX_TAPS_PER_GAP) {
                 state.done = true;
-                record("[Auto-tap] " + tag + ": stopped after " + MAX_TAPS_PER_GAP + " taps");
+                // まだ続きがあるかもしれないので、手で押せるように行を表示に戻す。
+                state.hidden = false;
+                boolean shown = showRow(view);
+                record("[Auto-tap] " + tag + ": stopped after " + MAX_TAPS_PER_GAP + " taps"
+                        + (shown ? "; shown again to tap by hand" : ""));
                 return;
             }
 
@@ -621,9 +633,32 @@ public final class AutoExpandCursor {
     /** タップで読み込みが始まれば、タップは効いている。行を消しても、その先のポストは失われない。 */
     private static void onLoadStarted(View view) {
         TapState state = tapStates.get(view);
-        if (state == null || !state.checking) return;
+        if (state != null && state.checking) {
+            state.started = true;
+            hideTappedGap(view, state);
+            return;
+        }
+        // 自動タップでも裏の読み込みでもないのに読み込みが始まった。手で押したということなので、
+        // 予約している自動タップは取りやめ (押し直すと要求が1回むだになる)、裏の読み込みも
+        // このボタンを要求しないようにする。
+        String key = boundKeys.get(view);
+        if (key == null || GapFill.stateOf(key) != GapFill.GAP_NEW && GapFill.stateOf(key) != GapFill.GAP_EMPTY) return;
+        if (state == null) {
+            state = new TapState();
+            state.key = key;
+            tapStates.put(view, state);
+        }
+        if (state.done) return;
+        state.done = true;
         state.started = true;
+        GapFill.onTapped(key);
+        record("[Manual] " + GapFill.tag(key) + ": loading was started by a tap by hand; no automatic tap");
         hideTappedGap(view, state);
+    }
+
+    /** ポストの詳細 (返信の画面) のボタンか。一覧の名前か、表示中の画面 (Activity) の名前で見分ける。 */
+    private static boolean isPostDetails(View view, String key) {
+        return "Post details".equals(GapFill.screenOfKey(key)) || screenOf(view).startsWith("TweetDetail");
     }
 
     private static void hideTappedGap(View view, TapState state) {
@@ -686,8 +721,11 @@ public final class AutoExpandCursor {
                 record("[Auto-tap] " + tag + ": nothing more was added");
             }
             // 読み込みが終わっても増えなかったギャップは、使い終わったものとして覚え、
-            // 次からは要求もタップもしない。
-            if (state.started && !loading && count >= 0) GapFill.markUsed(state.key);
+            // 次からは要求もタップもしない。ただし返信の続きのボタンは、会話を開き直すと
+            // また読み込める状態で現れるので、記録しない (裏の読み込みと同じ決まり)。
+            if (state.started && !loading && count >= 0 && !isPostDetails(view, state.key)) {
+                GapFill.markUsed(state.key);
+            }
         } catch (Throwable ex) {
             state.checking = false;
             state.done = true;
@@ -850,14 +888,14 @@ public final class AutoExpandCursor {
     }
 
     /**
-     * トーストのオプションがオンの時に、今起きたことを知らせる。翻訳に使う文字列の
+     * トーストの設定がオンの時に、今起きたことを知らせる。翻訳に使う文字列の
      * リソースが無いので、端末の言語で文言を選ぶ。
      */
     static void toast(String japanese, String english) {
         if (showToasts()) showToast(japanese, english);
     }
 
-    /** トーストのオプションに関係なくメッセージを出す。使う人が知っておくべきことに使う。 */
+    /** トーストの設定に関係なくメッセージを出す。使う人が知っておくべきことに使う。 */
     private static void showToast(String japanese, String english) {
         onMain(() -> {
             try {
@@ -898,7 +936,7 @@ public final class AutoExpandCursor {
     }
 
     /**
-     * logcat に出し、ログのオプションがオンなら Download/AutoExpand/AutoExpand-Log.txt にも書く。
+     * logcat に出し、ログの設定がオンなら Download/AutoExpand/AutoExpand-Log.txt にも書く。
      * ファイルは英語だけで書く。日本語を含めると、文字コードを UTF-8 と見なさないアプリで
      * 文字化けするため。logcat は古いものから消える仕組みで、X が数分で埋めてしまうので、
      * 何日か後に見つかったギャップの調査には使えない。
