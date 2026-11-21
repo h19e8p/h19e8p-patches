@@ -6,6 +6,10 @@ X（旧 Twitter）の Android アプリ 12.19.1 向けの、Morphe 用のパッ�
 
 非公式のパッチです。X Corp.、Morphe、piko とは関係ありません。
 
+<a href="https://morphe.software/add-source?github=h19e8p/h19e8p-patches">
+  <img src=".github/assets/add-to-morphe.svg" alt="Add to Morphe" height="48">
+</a>
+
 ## パッチ
 
 | パッチ | 内容 |
@@ -27,14 +31,7 @@ X（旧 Twitter）の Android アプリ 12.19.1 向けの、Morphe 用のパッ�
 - 「Feature flag tools」でフラグを piko の一覧に追加するには、piko の「Hook feature flag」も当ててください。当てていない時は、フラグを探すことだけができます。
 - ほかの版の X では、パッチが当たらないか、一部の働きだけが無効になります（「Auto expand hidden posts」は、裏の読み込みに必要な内部の名前が見つからない時は、自動でタップする動作だけになります）。
 
-## 使い方
-
-1. [Releases](../../releases) から `h19e8p-patches-<バージョン>.mpp` をダウンロードします。
-2. Morphe Manager で、ダウンロードした `.mpp` をパッチのソースとして追加します（piko のソースと並べて使います）。
-3. X を選び、使いたいパッチを選択してパッチを当て、インストールします。
-4. 設定は、X の「設定とプライバシー」→「h19e8p Patches」で変えます。Morphe Manager のパッチオプションはありません。
-
-### Auto Expand for X（1.1.0 まで）から移る場合
+## Auto Expand for X（1.1.0 まで）から移る場合
 
 このリポジトリは、以前は「Auto Expand for X」という名前で、パッチ 1 つだけを配っていました。2.0.0 からパッチ集「h19e8p Patches」になりました。
 
